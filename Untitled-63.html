@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>YouTube “Play on YouTube” Embed</title>
+  <style>
+    .video-container {
+      position: relative;
+      width: 560px;      /* change to 100% for a responsive width */
+      height: 315px;     /* 16:9 aspect ratio */
+      margin: 0 auto;
+    }
+    .video-container iframe {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+    .video-container .overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      text-indent: -9999px;  /* hide link text */
+      z-index: 10;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h1>Citrix Ready YouTube Video (Always “Play on YouTube”)</h1>
+
+  <!-- Fallback for users without JavaScript -->
+  <noscript>
+    <a href="https://www.youtube.com/watch?v=K4TOrB7at0Y"
+       target="_blank" rel="noopener">
+      <img src="https://img.youtube.com/vi/K4TOrB7at0Y/hqdefault.jpg"
+           alt="▶ Watch on YouTube"
+           style="max-width:100%; display:block; margin: 0 auto;" />
+    </a>
+  </noscript>
+
+  <!-- Embedded player with transparent overlay -->
+  <div class="video-container">
+    <iframe
+      src="https://www.youtube.com/embed/K4TOrB7at0Y?rel=0&modestbranding=1"
+      frameborder="0"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+      allowfullscreen>
+    </iframe>
+    <a class="overlay"
+       href="https://www.youtube.com/watch?v=K4TOrB7at0Y"
+       target="_blank" rel="noopener">
+      ▶ Play on YouTube
+    </a>
+  </div>
+</body>
+</html>
