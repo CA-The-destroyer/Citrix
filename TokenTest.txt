@@ -19,3 +19,7 @@ Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
   -Headers @{ Authorization = "bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
   -Method Get
 
+
+Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
+  -Headers @{ Authorization = "Bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
+  -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
