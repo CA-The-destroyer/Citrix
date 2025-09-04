@@ -1,12 +1,22 @@
-# 1) Paste your token into $tok
-$tok = "<ACCESS_TOKEN>"
-$base = "https://api-us.cloud.com"   # change region if needed
-$cust = "<CustomerId>"
 
-# 2) One-line GET
-Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines`?$top=1000" `
-  -Headers @{Authorization="CwsAuth bearer $tok"; "Citrix-CustomerId"=$cust; Accept="application/json"} `
-  -Method Get
+  # Sanity check
+"cust=[$cust]"
+# Must look like 8-4-4-4-12 hex
+if ($cust -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+  throw "CustomerId is invalid: '$cust'. Paste the GUID (no angle brackets, no org name)."
+}
+
+
+$base = "https://api-us.cloud.com"         # your region
+$tokenUri = "$base/cctrustoauth2/$cust/tokens/clients"
+$odataUri = "$base/monitorodata/$cust/v4/data/Machines?`$top=1000"
+"POST -> $tokenUri"; "GET -> $odataUri"
+
+
+
+$tok = Invoke-RestMethod -Method Post -Uri $tokenUri -ContentType "application/x-www-form-urlencoded" -Body "grant_type=client_credentials&client_id=$cid&client_secret=$sec"
+Invoke-RestMethod -Method Get -Uri $odataUri -Headers @{ Authorization = "Bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+
 
 
 
