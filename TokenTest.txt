@@ -24,17 +24,22 @@ Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
   -Headers @{ Authorization = "Bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
   -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
 
+##########################
 
+# ==== Setup ====
+$base = "https://api-us.cloud.com"   # or api-eu / api-ap-s / api.citrixcloud.jp
+$cust = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"   # your real CustomerId GUID
+$cid  = "your-client-id"
+$sec  = "your-client-secret"
 
-
-# 1) Get token (form-encoded)
-$base="https://api-us.cloud.com"; $cust="<CustomerId>"; $cid="<ClientId>"; $sec="<ClientSecret>"
+# ==== Get bearer token ====
 $tok = Invoke-RestMethod -Method Post -Uri "$base/cctrustoauth2/$cust/tokens/clients" `
   -ContentType "application/x-www-form-urlencoded" `
   -Body "grant_type=client_credentials&client_id=$cid&client_secret=$sec"
 
-# 2) Use token_type=bearer → Authorization: Bearer <token>
+# ==== Use it to pull machines (first 1000) ====
 Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
   -Headers @{ Authorization = "Bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
   -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+
 
