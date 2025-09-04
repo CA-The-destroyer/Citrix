@@ -1,4 +1,36 @@
+# Assume you already have the token response in $tok (with .access_token)
+$jwt = $tok.access_token
 
+# Base64url → JSON payload
+$mid = ($jwt -split '\.')[1]
+$pad = 4 - ($mid.Length % 4); if ($pad -lt 4) { $mid = $mid + ('=' * $pad) }
+$mid = $mid.Replace('-', '+').Replace('_', '/')
+$payloadJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($mid))
+$payload = $payloadJson | ConvertFrom-Json
+
+# 1) Try common claim names
+$cust = $payload.customerId
+if (-not $cust) { $cust = $payload.tenantId }
+if (-not $cust) { $cust = $payload.tid }
+if (-not $cust) { $cust = $payload.orgId }
+if (-not $cust) {
+  # 2) Fallback: pull the first GUID-looking value from the payload
+  $m = [regex]::Matches($payloadJson,'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}')
+  if ($m.Count -gt 0) { $cust = $m[0].Value }
+}
+
+if (-not $cust) { throw "Couldn't find a Customer ID GUID in the token payload.`nPayload: $payloadJson" }
+"CustomerId (GUID) detected: $cust"
+#######################################
+$base = "https://api-us.cloud.com"  # your region
+Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
+  -Headers @{ Authorization = "Bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
+  -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+
+
+
+
+#######################################
   # Sanity check
 "cust=[$cust]"
 # Must look like 8-4-4-4-12 hex
