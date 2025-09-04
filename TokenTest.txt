@@ -12,3 +12,10 @@ Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines`?$top=1000" `
 
 
 Invoke-RestMethod -Uri "https://api-us.cloud.com/monitorodata/<CustomerId>/v4/data/Machines?`$top=1000" -Headers @{Authorization="CwsAuth bearer <ACCESS_TOKEN>";"Citrix-CustomerId"="<CustomerId>";Accept="application/json"} -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+
+
+
+Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
+  -Headers @{ Authorization = "bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
+  -Method Get
+
