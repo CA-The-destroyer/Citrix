@@ -1,0 +1,9 @@
+# 1) Paste your token into $tok
+$tok = "<ACCESS_TOKEN>"
+$base = "https://api-us.cloud.com"   # change region if needed
+$cust = "<CustomerId>"
+
+# 2) One-line GET
+Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines`?$top=1000" `
+  -Headers @{Authorization="CwsAuth bearer $tok"; "Citrix-CustomerId"=$cust; Accept="application/json"} `
+  -Method Get
