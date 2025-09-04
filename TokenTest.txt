@@ -23,3 +23,18 @@ Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
 Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
   -Headers @{ Authorization = "Bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
   -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+
+
+
+
+# 1) Get token (form-encoded)
+$base="https://api-us.cloud.com"; $cust="<CustomerId>"; $cid="<ClientId>"; $sec="<ClientSecret>"
+$tok = Invoke-RestMethod -Method Post -Uri "$base/cctrustoauth2/$cust/tokens/clients" `
+  -ContentType "application/x-www-form-urlencoded" `
+  -Body "grant_type=client_credentials&client_id=$cid&client_secret=$sec"
+
+# 2) Use token_type=bearer → Authorization: Bearer <token>
+Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
+  -Headers @{ Authorization = "Bearer $($tok.access_token)"; "Citrix-CustomerId" = $cust; Accept = "application/json" } `
+  -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+
