@@ -1,3 +1,84 @@
+# ==== Inputs (fill these; no angle brackets) ====
+$base = "https://api-us.cloud.com"            # use the SAME region you used for the token: api-us / api-eu / api-ap-s / api.citrixcloud.jp
+$cid  = "<ClientId>"
+$sec  = "<ClientSecret>"
+
+# If you don't trust $cust, pull it from the token payload instead of guessing:
+function Get-CitrixToken {
+  param($Base,$Cust,$CID,$SEC)
+  Invoke-RestMethod -Method Post -Uri "$Base/cctrustoauth2/$Cust/tokens/clients" -ContentType "application/x-www-form-urlencoded" -Body "grant_type=client_credentials&client_id=$CID&client_secret=$SEC"
+}
+
+# If you already discovered a GUID, set it here; otherwise this will be fixed after first token call.
+$cust = "<CustomerId-GUID>"
+
+# Guard: must be a GUID 8-4-4-4-12
+if ($cust -notmatch '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$') {
+  Write-Host "CustomerId not a GUID; extracting from token payload..." -ForegroundColor Yellow
+  # We need *some* GUID to get a token. If you used a placeholder before, stop and paste the real GUID here.
+  throw "Set `$cust to your real CustomerId GUID (not org short name)."
+}
+
+# 1) Get token
+$tok = Get-CitrixToken -Base $base -Cust $cust -CID $cid -SEC $sec
+$auth = if ($tok.token_type) { "$($tok.token_type) $($tok.access_token)" } else { "Bearer $($tok.access_token)" }
+Write-Host "token_type=$($tok.token_type) expires_in=$($tok.expires_in)" -ForegroundColor Cyan
+
+# Build URLs
+$odataUrl = "$base/monitorodata/$cust/v4/data/Machines?`$top=1000"
+$odataRoot= "$base/monitorodata/$cust/v4/data"
+$daasUrl  = "$base/cvad/manage/Machines?`$top=1000"
+
+Write-Host "OData root  -> $odataRoot"
+Write-Host "OData call  -> $odataUrl"
+Write-Host "DaaS manage -> $daasUrl"
+
+# 2) Probe OData root first (lists entities) with Citrix-CustomerId
+try {
+  $h = @{ Authorization = $auth; "Citrix-CustomerId" = $cust; Accept = "application/json" }
+  Write-Host "`n[Probe] GET OData root with Citrix-CustomerId..." -ForegroundColor Green
+  $root = Invoke-RestMethod -Method Get -Uri $odataRoot -Headers $h
+  Write-Host "OData root OK. Entities available." -ForegroundColor Green
+} catch {
+  Write-Host "OData root failed: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# 3) Try Machines with Citrix-CustomerId
+try {
+  Write-Host "`n[Try #1] OData Machines with Citrix-CustomerId..." -ForegroundColor Green
+  $data = Invoke-RestMethod -Method Get -Uri $odataUrl -Headers $h
+  $data | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+  Write-Host "Wrote machines.json (first page)." -ForegroundColor Green
+  return
+} catch {
+  Write-Host "[Try #1] failed: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# 4) Try Machines with Citrix-Cloud-CustomerId (alternate header some tenants require)
+try {
+  Write-Host "`n[Try #2] OData Machines with Citrix-Cloud-CustomerId..." -ForegroundColor Green
+  $h2 = @{ Authorization = $auth; "Citrix-Cloud-CustomerId" = $cust; Accept = "application/json" }
+  $data2 = Invoke-RestMethod -Method Get -Uri $odataUrl -Headers $h2
+  $data2 | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
+  Write-Host "Wrote machines.json (first page) using Citrix-Cloud-CustomerId." -ForegroundColor Green
+  return
+} catch {
+  Write-Host "[Try #2] failed: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# 5) Fallback: DaaS REST Machines (proves auth/org even if Monitor OData isn’t enabled)
+try {
+  Write-Host "`n[Try #3] DaaS REST Machines..." -ForegroundColor Green
+  $m = Invoke-RestMethod -Method Get -Uri $daasUrl -Headers $h
+  $m | ConvertTo-Json -Depth 6 | Out-File .\machines_admin.json -Encoding utf8
+  Write-Host "Wrote machines_admin.json from DaaS REST." -ForegroundColor Green
+} catch {
+  Write-Host "[Try #3] failed: $($_.Exception.Message)" -ForegroundColor Red
+}
+
+
+
+######################
 # Assume you already have the token response in $tok (with .access_token)
 $jwt = $tok.access_token
 
