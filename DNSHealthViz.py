@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # DNSHealthViz_console.py — live console dashboard for DNSHealthChk CSVs
-# Stdlib only: tails today's CSV and prints a rolling table.
+# Stdlib only: tails today's CSV and prints a rolling table (timezone-safe).
 
 import argparse, csv, datetime as dt, os, time, collections, math
 
 DATEFMT = "%Y-%m-%d"
 
 def latest_csv(csv_dir: str) -> str:
-    return os.path.join(csv_dir, f"dns_trend_{dt.datetime.utcnow().strftime(DATEFMT)}.csv")
+    return os.path.join(csv_dir, f"dns_trend_{dt.datetime.now(dt.timezone.utc).strftime(DATEFMT)}.csv")
 
 def tail_csv(path: str, start_pos: int):
     """Return (new_pos, [new_lines]) from CSV starting at byte offset start_pos."""
@@ -35,10 +35,14 @@ def parse_row(line: str):
     while len(r) < 11:
         r.append("")
     ts_iso, resolver, qname, rtype, success, latency_ms, rcode, answers, ttl, used_tcp, err = r[:11]
+    # parse timestamp (force UTC-aware)
     try:
-        ts = dt.datetime.fromisoformat(ts_iso.replace("Z","+00:00"))
+        ts = dt.datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
     except Exception:
-        ts = dt.datetime.utcnow()
+        ts = dt.datetime.now(dt.timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    # latency
     try:
         lat = float(latency_ms)
     except Exception:
@@ -76,22 +80,20 @@ def main():
     ap.add_argument("--refresh", type=float, default=2.0, help="Seconds between screen refresh (default 2s)")
     args = ap.parse_args()
 
-    current_day = dt.datetime.utcnow().strftime(DATEFMT)
+    current_day = dt.datetime.now(dt.timezone.utc).strftime(DATEFMT)
     csv_path = latest_csv(args.csv_dir)
     file_pos = 0
 
-    # series buffers: key -> deque of (ts, ok(0/1), latency_ms)
+    # series buffers: key -> deque of (ts(aware UTC), ok(0/1), latency_ms)
     series = collections.defaultdict(lambda: collections.deque(maxlen=args.window))
-
-    # last-seen timestamp per key for staleness display
-    last_ts = {}
+    last_ts = {}  # last-seen timestamp per key
 
     def key_of(resolver, qname, rtype):
         return (resolver, f"{qname} ({rtype})") if args.group_by_target else resolver
 
     def roll_if_new_day():
         nonlocal current_day, csv_path, file_pos
-        today = dt.datetime.utcnow().strftime(DATEFMT)
+        today = dt.datetime.now(dt.timezone.utc).strftime(DATEFMT)
         if today != current_day:
             current_day = today
             csv_path = latest_csv(args.csv_dir)
@@ -106,13 +108,12 @@ def main():
 
     def summarize():
         rows = []
-        now = dt.datetime.utcnow()
+        now = dt.datetime.now(dt.timezone.utc)  # aware
         for k, dq in series.items():
             if not dq:
                 continue
             oks = [v[1] for v in dq]
             lats = [v[2] for v in dq if not math.isnan(v[2])]
-            # stats
             cnt = len(dq)
             ok_rate = (sum(oks)/cnt)*100.0
             p50 = percentile(lats, 50) if lats else None
@@ -128,7 +129,7 @@ def main():
                 "last": last_latency,
                 "age": age_s
             })
-        # sort: worst ok_rate first, then highest p95
+        # sort: lowest OK% first, then highest p95
         rows.sort(key=lambda r: (r["ok_rate"], -(r["p95"] if r["p95"] is not None else -1)), reverse=False)
         return rows
 
@@ -142,7 +143,8 @@ def main():
         rows = summarize()
         clear_console()
         print("DNSHealthViz (console)   |   Source:", csv_path)
-        print("Window size:", args.window, "points    Refresh:", args.refresh, "s    Time (UTC):", dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+        print("Window size:", args.window, "points    Refresh:", args.refresh, "s    Time (UTC):",
+              dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         print("-"*110)
         hdr = "{:<34} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7}".format(
             "Series (Resolver[/Target])", "N", "OK%", "p50", "p95", "Last", "Age"
@@ -154,7 +156,6 @@ def main():
         else:
             for r in rows:
                 key_str = r["key"] if isinstance(r["key"], str) else f"{r['key'][0]} / {r['key'][1]}"
-                # formatting and simple status color (ANSI) if available
                 okpct = f"{r['ok_rate']:.1f}"
                 p50 = fmt_ms(r["p50"])
                 p95 = fmt_ms(r["p95"])
