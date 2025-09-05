@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-# DNSHealthViz.py — live viewer for DNSHealthChk CSVs (matplotlib only, no pandas)
-# Requires: matplotlib (install via your private /simple index)
+# DNSHealthViz_console.py — live console dashboard for DNSHealthChk CSVs
+# Stdlib only: tails today's CSV and prints a rolling table.
 
-import argparse, csv, datetime as dt, os, time, collections
-from matplotlib import pyplot as plt
-from matplotlib.animation import FuncAnimation
+import argparse, csv, datetime as dt, os, time, collections, math
 
-ROLLING_POINTS = 600      # keep last N points per series (e.g., 600 x 5s ≈ 50 min)
-POLL_INTERVAL_MS = 2000   # refresh every 2 seconds
 DATEFMT = "%Y-%m-%d"
 
-def find_latest_csv(csv_dir: str) -> str:
-    today = dt.datetime.utcnow().strftime(DATEFMT)
-    return os.path.join(csv_dir, f"dns_trend_{today}.csv")
+def latest_csv(csv_dir: str) -> str:
+    return os.path.join(csv_dir, f"dns_trend_{dt.datetime.utcnow().strftime(DATEFMT)}.csv")
 
-def tail_csv(path, start_pos=0):
-    """Yield new rows from a CSV file starting at byte offset start_pos."""
+def tail_csv(path: str, start_pos: int):
+    """Return (new_pos, [new_lines]) from CSV starting at byte offset start_pos."""
     if not os.path.exists(path):
         return start_pos, []
     with open(path, "r", encoding="utf-8") as f:
@@ -27,123 +22,152 @@ def tail_csv(path, start_pos=0):
         if not line.strip():
             continue
         if start_pos == 0 and i == 0 and line.lower().startswith("timestamp_utc"):
-            # header line
+            # header
             continue
         rows.append(line)
     return new_pos, rows
 
 def parse_row(line: str):
-    # CSV columns:
+    # Columns:
     # timestamp_utc,resolver,query,type,success,latency_ms,rcode,answers,ttl,used_tcp,error
     r = next(csv.reader([line]))
-    ts_iso, resolver, qname, rtype, success, latency_ms, rcode, answers, ttl, used_tcp, err = (r + [""]*11)[:11]
-    # parse time
+    # pad to 11
+    while len(r) < 11:
+        r.append("")
+    ts_iso, resolver, qname, rtype, success, latency_ms, rcode, answers, ttl, used_tcp, err = r[:11]
     try:
         ts = dt.datetime.fromisoformat(ts_iso.replace("Z","+00:00"))
     except Exception:
         ts = dt.datetime.utcnow()
-    # parse latency
     try:
         lat = float(latency_ms)
     except Exception:
-        lat = float("nan")
+        lat = math.nan
     ok = (rcode == "NOERROR") and (success in ("1", "True", "true"))
-    return ts, resolver, qname, rtype, ok, lat
+    return ts, resolver, qname, rtype, ok, lat, rcode
+
+def clear_console():
+    # Windows cls / ANSI fallback
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        print("\033[2J\033[H", end="")
+
+def fmt_ms(x):
+    if x is None or math.isnan(x):
+        return "—"
+    if x >= 1000:
+        return f"{x/1000:.2f}s"
+    return f"{x:.0f}ms"
+
+def percentile(arr, p):
+    if not arr:
+        return None
+    a = sorted(arr)
+    k = max(0, min(len(a)-1, int(round((p/100.0)*(len(a)-1)))))
+    return a[k]
 
 def main():
-    ap = argparse.ArgumentParser(description="Live matplotlib viewer for DNSHealthChk CSVs")
+    ap = argparse.ArgumentParser(description="Console dashboard for DNSHealthChk CSVs (no GUI)")
     ap.add_argument("--csv-dir", required=True, help="Directory where DNSHealthChk writes CSVs (e.g., C:\\temp\\dns_trend)")
-    ap.add_argument("--window", type=int, default=ROLLING_POINTS, help="Rolling points per series (default 600)")
+    ap.add_argument("--window", type=int, default=300, help="Rolling points per series (default 300)")
     ap.add_argument("--group-by-target", action="store_true",
-                    help="If set, one line per resolver+target. Default: aggregate per resolver.")
-    ap.add_argument("--refresh-ms", type=int, default=POLL_INTERVAL_MS, help="UI refresh interval in ms (default 2000)")
+                    help="If set, show lines per resolver+target; otherwise aggregate per resolver.")
+    ap.add_argument("--refresh", type=float, default=2.0, help="Seconds between screen refresh (default 2s)")
     args = ap.parse_args()
 
-    csv_path = find_latest_csv(args.csv_dir)
-    file_pos = 0
     current_day = dt.datetime.utcnow().strftime(DATEFMT)
+    csv_path = latest_csv(args.csv_dir)
+    file_pos = 0
 
-    # Data buffers
-    series = {}       # key -> { "t": deque, "y": deque }
-    ok_series = {}    # key -> { "t": deque, "y": deque } where y in {0,1}
+    # series buffers: key -> deque of (ts, ok(0/1), latency_ms)
+    series = collections.defaultdict(lambda: collections.deque(maxlen=args.window))
+
+    # last-seen timestamp per key for staleness display
+    last_ts = {}
 
     def key_of(resolver, qname, rtype):
         return (resolver, f"{qname} ({rtype})") if args.group_by_target else resolver
 
-    # Matplotlib setup
-    plt.figure("DNSHealthViz", figsize=(11, 6))
-    ax_lat = plt.subplot2grid((3,1), (0,0), rowspan=2)
-    ax_ok  = plt.subplot2grid((3,1), (2,0), rowspan=1, sharex=ax_lat)
-
-    ax_lat.set_title("DNS Latency (ms)")
-    ax_lat.set_ylabel("Latency (ms)")
-    ax_ok.set_title("Success (1) / Failure (0)")
-    ax_ok.set_ylim(-0.1, 1.1)
-    ax_ok.set_xlabel("Time (UTC)")
-
-    lines = {}     # key -> Line2D
-    ok_lines = {}  # key -> Line2D
-
-    def ensure_key(k):
-        import collections as _c
-        if k not in series:
-            series[k] = {"t": _c.deque(maxlen=args.window),
-                         "y": _c.deque(maxlen=args.window)}
-        if k not in ok_series:
-            ok_series[k] = {"t": _c.deque(maxlen=args.window),
-                            "y": _c.deque(maxlen=args.window)}
-        if k not in lines:
-            (line,) = ax_lat.plot([], [], linewidth=1.8, label=str(k))
-            lines[k] = line
-            (oline,) = ax_ok.plot([], [], linewidth=1.2, label=str(k))
-            ok_lines[k] = oline
-            ax_lat.legend(loc="upper left", fontsize="small", ncols=2)
-
-    def ingest_rows(rows):
-        for line in rows:
-            ts, resolver, qname, rtype, ok, lat = parse_row(line)
-            k = key_of(resolver, qname, rtype)
-            ensure_key(k)
-            series[k]["t"].append(ts)
-            series[k]["y"].append(lat)
-            ok_series[k]["t"].append(ts)
-            ok_series[k]["y"].append(1 if ok else 0)
-
-    def maybe_roll_to_new_day():
-        nonlocal csv_path, file_pos, current_day
+    def roll_if_new_day():
+        nonlocal current_day, csv_path, file_pos
         today = dt.datetime.utcnow().strftime(DATEFMT)
         if today != current_day:
-            csv_path = find_latest_csv(args.csv_dir)
-            file_pos = 0
             current_day = today
+            csv_path = latest_csv(args.csv_dir)
+            file_pos = 0
 
-    def on_timer(_frame):
-        nonlocal file_pos
-        maybe_roll_to_new_day()
-        file_pos, rows = tail_csv(csv_path, file_pos)
-        if rows:
-            ingest_rows(rows)
+    def ingest(lines):
+        for line in lines:
+            ts, resolver, qname, rtype, ok, lat, rcode = parse_row(line)
+            k = key_of(resolver, qname, rtype)
+            series[k].append((ts, 1 if ok else 0, lat))
+            last_ts[k] = ts
 
-        # refresh lines
-        for k, line in lines.items():
-            t = series[k]["t"]; y = series[k]["y"]
-            if len(t) > 0:
-                line.set_data(t, y)
-        for k, line in ok_lines.items():
-            t = ok_series[k]["t"]; y = ok_series[k]["y"]
-            if len(t) > 0:
-                line.set_data(t, y)
+    def summarize():
+        rows = []
+        now = dt.datetime.utcnow()
+        for k, dq in series.items():
+            if not dq:
+                continue
+            oks = [v[1] for v in dq]
+            lats = [v[2] for v in dq if not math.isnan(v[2])]
+            # stats
+            cnt = len(dq)
+            ok_rate = (sum(oks)/cnt)*100.0
+            p50 = percentile(lats, 50) if lats else None
+            p95 = percentile(lats, 95) if lats else None
+            last_latency = next((v[2] for v in reversed(dq) if not math.isnan(v[2])), math.nan)
+            age_s = (now - last_ts.get(k, now)).total_seconds()
+            rows.append({
+                "key": k,
+                "count": cnt,
+                "ok_rate": ok_rate,
+                "p50": p50,
+                "p95": p95,
+                "last": last_latency,
+                "age": age_s
+            })
+        # sort: worst ok_rate first, then highest p95
+        rows.sort(key=lambda r: (r["ok_rate"], -(r["p95"] if r["p95"] is not None else -1)), reverse=False)
+        return rows
 
-        # autoscale
-        if series:
-            ax_lat.relim(); ax_lat.autoscale_view()
-            ax_ok.relim();  ax_ok.autoscale_view(scalex=True, scaley=False)
-        plt.tight_layout()
+    while True:
+        roll_if_new_day()
+        file_pos, lines = tail_csv(csv_path, file_pos)
+        if lines:
+            ingest(lines)
 
-    anim = FuncAnimation(plt.gcf(), on_timer, interval=args.refresh_ms)
-    print(f"[INFO] Live viewer watching: {csv_path}")
-    print(f"[INFO] Ctrl+C to exit.")
-    plt.show()
+        # render
+        rows = summarize()
+        clear_console()
+        print("DNSHealthViz (console)   |   Source:", csv_path)
+        print("Window size:", args.window, "points    Refresh:", args.refresh, "s    Time (UTC):", dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+        print("-"*110)
+        hdr = "{:<34} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7}".format(
+            "Series (Resolver[/Target])", "N", "OK%", "p50", "p95", "Last", "Age"
+        )
+        print(hdr)
+        print("-"*110)
+        if not rows:
+            print("(waiting for data…)")
+        else:
+            for r in rows:
+                key_str = r["key"] if isinstance(r["key"], str) else f"{r['key'][0]} / {r['key'][1]}"
+                # formatting and simple status color (ANSI) if available
+                okpct = f"{r['ok_rate']:.1f}"
+                p50 = fmt_ms(r["p50"])
+                p95 = fmt_ms(r["p95"])
+                last = fmt_ms(r["last"])
+                age = f"{int(r['age']):>3}s"
+                line = "{:<34} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7}".format(
+                    key_str[:34], r["count"], okpct, p50, p95, last, age
+                )
+                print(line)
+
+        print("-"*110)
+        print("Legend: OK% = success rate in window | p50/p95 = latency percentiles | Last = most recent latency | Age = secs since last sample")
+        time.sleep(args.refresh)
 
 if __name__ == "__main__":
     try:
