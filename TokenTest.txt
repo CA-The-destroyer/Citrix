@@ -166,3 +166,23 @@ Invoke-RestMethod -Uri "$base/monitorodata/$cust/v4/data/Machines?`$top=1000" `
   -Method Get | ConvertTo-Json -Depth 6 | Out-File .\machines.json -Encoding utf8
 
 
+##############################
+Cust ID check
+##############################
+$base="https://api-us.cloud.com"
+$cust="<suspected-GUID>"
+$cid="<ClientId>"
+$sec="<ClientSecret>"
+
+$tok = Invoke-RestMethod -Method Post -Uri "$base/cctrustoauth2/$cust/tokens/clients" `
+  -ContentType "application/x-www-form-urlencoded" `
+  -Body "grant_type=client_credentials&client_id=$cid&client_secret=$sec"
+
+if ($tok.access_token) {
+    Write-Host "CustomerId is valid for this tenant." -ForegroundColor Green
+} else {
+    Write-Host "CustomerId failed to authenticate." -ForegroundColor Red
+}
+
+
+
