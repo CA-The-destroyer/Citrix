@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# DNSHealthGraph.py — rolling p50 / p95 plots from DNSHealthChk CSV (robust)
-# Stdlib + matplotlib only.
+# DNSHealthGraph.py — rolling p50 / p95 plots from DNSHealthChk CSV
+# Stdlib + matplotlib. Saves PNG with --out (headless-safe) or shows a window.
 
 import argparse, csv, datetime as dt, os, math
 from collections import defaultdict, deque
-import matplotlib.pyplot as plt
+import matplotlib
 import matplotlib.dates as mdates
 
 DATEFMT = "%Y-%m-%d"
@@ -55,7 +55,13 @@ def main():
     ap.add_argument("--no-only-ok", dest="only_ok", action="store_false")
     ap.add_argument("--include-raw", action="store_true", help="Overlay faint raw latency dots")
     ap.add_argument("--threshold-ms", type=float, default=None, help="Optional horizontal threshold line (e.g., 10)")
+    ap.add_argument("--out", type=str, default=None, help="If set, save PNG to this path instead of showing a window")
     args = ap.parse_args()
+
+    # Headless-safe backend selection: if saving and no display, use Agg BEFORE importing pyplot
+    if args.out and not os.environ.get("DISPLAY"):
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # import after backend decision
 
     csv_path = os.path.join(args.csv_dir, f"dns_trend_{args.date}.csv")
     if not os.path.exists(csv_path):
@@ -69,7 +75,6 @@ def main():
     raws_t = defaultdict(list)
     raws_y = defaultdict(list)
 
-    # Freeze flags to avoid inner-scope surprises
     group_by_target = args.group_by_target
     only_ok = args.only_ok
     include_raw = args.include_raw
@@ -92,7 +97,7 @@ def main():
         sv = sorted(roll[k])
         p50 = percentile(sv, 50)
         p95 = percentile(sv, 95)
-        # Guard: ensure p95 >= p50; if NaN, fallback
+        # Guards so band never inverts / NaN-proofs
         if math.isnan(p50) and not math.isnan(p95):
             p50 = p95
         if math.isnan(p95) and not math.isnan(p50):
@@ -121,15 +126,14 @@ def main():
         ax.plot(x, p50_list, linewidth=1.8, label=f"{label} p50")
 
         # Shaded band p50 → p95 (handle NaNs by collapsing band)
-        upper = []
-        lower = []
+        lower, upper = [], []
         for a, b in zip(p50_list, p95_list):
             if math.isnan(a) and math.isnan(b):
-                upper.append(math.nan); lower.append(math.nan)
+                lower.append(math.nan); upper.append(math.nan)
             elif math.isnan(a):
-                upper.append(b); lower.append(b)
+                lower.append(b); upper.append(b)
             elif math.isnan(b):
-                upper.append(a); lower.append(a)
+                lower.append(a); upper.append(a)
             else:
                 lo = min(a, b); hi = max(a, b)
                 lower.append(lo); upper.append(hi)
@@ -152,7 +156,12 @@ def main():
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     fig.autofmt_xdate()
     plt.tight_layout()
-    plt.show()
+
+    if args.out:
+        plt.savefig(args.out, dpi=130)
+        print(f"[OK] Saved PNG -> {args.out}")
+    else:
+        plt.show()
 
 if __name__ == "__main__":
     main()
