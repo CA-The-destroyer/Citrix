@@ -1,0 +1,2 @@
+$token = "<your_bearer_token>"   # from your earlier auth flow
+Get-AcctIdentity -AdminAddress "localhost:89" -BearerToken $token -MaxRecordCount 1 | Select TenantId, IdentityAccountName
