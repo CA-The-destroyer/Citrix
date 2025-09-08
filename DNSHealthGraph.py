@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# DNSHealthGraph.py — rolling p50 / p95 plots from DNSHealthChk CSV (matplotlib + stdlib)
+# DNSHealthGraph.py — rolling p50 / p95 plots from DNSHealthChk CSV (robust)
+# Stdlib + matplotlib only.
 
 import argparse, csv, datetime as dt, os, math
 from collections import defaultdict, deque
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 DATEFMT = "%Y-%m-%d"
 
@@ -22,7 +24,6 @@ def percentile(sorted_vals, p):
     n = len(sorted_vals)
     if n == 1:
         return float(sorted_vals[0])
-    # nearest-rank on [0, n-1]
     idx = max(0, min(n - 1, int(round((p / 100.0) * (n - 1)))))
     return float(sorted_vals[idx])
 
@@ -46,22 +47,21 @@ def main():
     ap.add_argument("--csv-dir", required=True, help="Folder with dns_trend_YYYY-MM-DD.csv")
     ap.add_argument("--date", default=dt.datetime.now(dt.timezone.utc).strftime(DATEFMT),
                     help="UTC date (YYYY-MM-DD). Default: today")
-    ap.add_argument("--window", type=int, default=60,
-                    help="Rolling window size in samples (default 60)")
+    ap.add_argument("--window", type=int, default=60, help="Rolling window size in samples (default 60)")
     ap.add_argument("--group-by-target", action="store_true",
                     help="Plot resolver+target lines instead of resolver-only")
-    ap.add_argument("--only-ok", action="store_true",
-                    help="Ignore non-NOERROR rows when computing percentiles (default on).")
-    ap.add_argument("--include-raw", action="store_true",
-                    help="Overlay faint raw latency dots")
+    ap.add_argument("--only-ok", action="store_true", default=True,
+                    help="Only include NOERROR rows (default True). Use --no-only-ok to include all.")
+    ap.add_argument("--no-only-ok", dest="only_ok", action="store_false")
+    ap.add_argument("--include-raw", action="store_true", help="Overlay faint raw latency dots")
+    ap.add_argument("--threshold-ms", type=float, default=None, help="Optional horizontal threshold line (e.g., 10)")
     args = ap.parse_args()
 
     csv_path = os.path.join(args.csv_dir, f"dns_trend_{args.date}.csv")
     if not os.path.exists(csv_path):
         raise SystemExit(f"[ERROR] File not found: {csv_path}")
 
-    # data structures: per series key store time, rolling q, and outputs
-    # key = resolver or (resolver,target)
+    # Data structures per series
     roll = defaultdict(lambda: deque(maxlen=args.window))
     times = defaultdict(list)
     p50s  = defaultdict(list)
@@ -69,52 +69,88 @@ def main():
     raws_t = defaultdict(list)
     raws_y = defaultdict(list)
 
-    def key_for(resolver, target):
-        return (resolver, target) if args.group_by_target else resolver
+    # Freeze flags to avoid inner-scope surprises
+    group_by_target = args.group_by_target
+    only_ok = args.only_ok
+    include_raw = args.include_raw
 
-    # ingest
+    def key_for(resolver, target):
+        return (resolver, target) if group_by_target else resolver
+
+    # Ingest rows
     for ts, resolver, target, lat, ok in load_rows(csv_path):
-        if args.only_ok and not ok:
+        if only_ok and not ok:
             continue
         k = key_for(resolver, target)
-        # append raw
-        if args.include-raw:
-            raws_t[k].append(ts); raws_y[k].append(lat)
-        # update rolling window + compute percentiles
+
+        if include_raw:
+            raws_t[k].append(ts)
+            raws_y[k].append(lat)
+
         roll[k].append(lat)
         times[k].append(ts)
-        # compute percentiles on a sorted copy (window is small)
-        sorted_vals = sorted(roll[k])
-        p50s[k].append(percentile(sorted_vals, 50))
-        p95s[k].append(percentile(sorted_vals, 95))
+        sv = sorted(roll[k])
+        p50 = percentile(sv, 50)
+        p95 = percentile(sv, 95)
+        # Guard: ensure p95 >= p50; if NaN, fallback
+        if math.isnan(p50) and not math.isnan(p95):
+            p50 = p95
+        if math.isnan(p95) and not math.isnan(p50):
+            p95 = p50
+        if not math.isnan(p50) and not math.isnan(p95) and p95 < p50:
+            p95 = p50
+
+        p50s[k].append(p50)
+        p95s[k].append(p95)
 
     if not times:
         raise SystemExit("[INFO] No data to plot (check date/path or window too large).")
 
-    # plot
-    plt.figure(figsize=(12, 7))
-    ax = plt.gca()
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 7))
 
     for k in sorted(times.keys(), key=lambda x: str(x)):
         ts_list = times[k]
         p50_list = p50s[k]
         p95_list = p95s[k]
 
-        # p50 line
+        # Convert to Matplotlib date numbers (robust for tz-aware datetimes)
+        x = [mdates.date2num(t) for t in ts_list]
+
         label = k if isinstance(k, str) else f"{k[0]} / {k[1]}"
-        line, = ax.plot(ts_list, p50_list, linewidth=1.8, label=f"{label} p50")
+        ax.plot(x, p50_list, linewidth=1.8, label=f"{label} p50")
 
-        # shaded band p50->p95
-        ax.fill_between(ts_list, p50_list, p95_list, alpha=0.18)
+        # Shaded band p50 → p95 (handle NaNs by collapsing band)
+        upper = []
+        lower = []
+        for a, b in zip(p50_list, p95_list):
+            if math.isnan(a) and math.isnan(b):
+                upper.append(math.nan); lower.append(math.nan)
+            elif math.isnan(a):
+                upper.append(b); lower.append(b)
+            elif math.isnan(b):
+                upper.append(a); lower.append(a)
+            else:
+                lo = min(a, b); hi = max(a, b)
+                lower.append(lo); upper.append(hi)
 
-        # raw points (optional)
-        if args.include-raw and raws_t.get(k):
-            ax.scatter(raws_t[k], raws_y[k], s=8, alpha=0.25)
+        ax.fill_between(x, lower, upper, alpha=0.18)
+
+        if include_raw and raws_t.get(k):
+            xr = [mdates.date2num(t) for t in raws_t[k]]
+            ax.scatter(xr, raws_y[k], s=8, alpha=0.25)
+
+    # Optional threshold line
+    if args.threshold_ms is not None:
+        ax.axhline(args.threshold_ms, linestyle="--", linewidth=1.2)
 
     ax.set_title(f"DNS Rolling Latency (window={args.window} samples) — p50 line, p50→p95 band")
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Latency (ms)")
     ax.legend(fontsize="small", ncol=2)
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    fig.autofmt_xdate()
     plt.tight_layout()
     plt.show()
 
