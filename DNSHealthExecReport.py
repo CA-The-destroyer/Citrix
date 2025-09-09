@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # DNSHealthExecReport.py — Executive-friendly DNS health report (PNG)
-# Route-aware offenders (target + src->dst), tuned layout (no overlap).
-# Deps: matplotlib (no pandas/numpy).
+# Adds --trend-by {overall,resolver,route} for per-minute p95 trend lines.
+# Route-aware offenders (target + src->dst). Deps: matplotlib (no pandas/numpy).
 
 import argparse, csv, datetime as dt, os, math, collections
 import matplotlib
@@ -68,6 +68,10 @@ def main():
     ap.add_argument("--topn", type=int, default=8, help="Top-N offending (target+route) groups (default 8)")
     ap.add_argument("--ok-thresh", type=float, default=THRESH_OK, help="OK%% threshold")
     ap.add_argument("--p95-thresh", type=float, default=THRESH_P95, help="p95 threshold in ms")
+    ap.add_argument("--trend-by", choices=["overall","resolver","route"], default="overall",
+                    help="Group p95 trend line by: overall (one line), resolver, or route (src→dst)")
+    ap.add_argument("--trend-max-series", type=int, default=8,
+                    help="When trend-by != overall, cap number of series to avoid clutter (default 8)")
     args = ap.parse_args()
 
     # Headless-safe backend when saving
@@ -103,16 +107,42 @@ def main():
     fail_count = total - ok_count
 
     # ---------- Trend: per-minute p95 ----------
-    minute_bins = collections.defaultdict(list)
+    # Group key depending on trend-by
+    def trend_key(r):
+        if args.trend_by == "overall":
+            return "overall"
+        elif args.trend_by == "resolver":
+            return r["resolver"]
+        else:  # route
+            return f"{r.get('src_ip','')}→{r.get('dst_ip','') or r['resolver']}"
+
+    minute_bins_by_group = collections.defaultdict(lambda: collections.defaultdict(list))
     for r in rows:
         if r["ok"] and not math.isnan(r["lat"]):
-            minute_bins[bucket_minute(r["ts"])].append(r["lat"])
-    trend_x, trend_p95 = [], []
-    if minute_bins:
-        for t in sorted(minute_bins.keys()):
-            sv = sorted(minute_bins[t])
-            trend_x.append(mdates.date2num(t))
-            trend_p95.append(percentile(sv, 95))
+            g = trend_key(r)
+            minute_bins_by_group[g][bucket_minute(r["ts"])].append(r["lat"])
+
+    # Build trend series (group -> (x[], y[]))
+    trend_series = {}
+    for g, bins in minute_bins_by_group.items():
+        xs, ys = [], []
+        for t in sorted(bins.keys()):
+            sv = sorted(bins[t])
+            xs.append(mdates.date2num(t))
+            ys.append(percentile(sv, 95))
+        if xs:
+            trend_series[g] = (xs, ys)
+
+    # If too many groups, pick the "worst" N by recent p95
+    if args.trend_by != "overall" and len(trend_series) > args.trend_max_series:
+        ranked = []
+        for g, (xs, ys) in trend_series.items():
+            last = ys[-1] if ys else float("nan")
+            ranked.append((g, last if not math.isnan(last) else -1.0))
+        # sort by last p95 desc (NaNs last)
+        ranked.sort(key=lambda t: (t[1] if t[1] is not None else -1.0), reverse=True)
+        keep = set(g for g, _ in ranked[:args.trend_max_series])
+        trend_series = {g: v for g, v in trend_series.items() if g in keep}
 
     # ---------- Route-aware offenders: (target, src, dst) ----------
     per_group_lats = collections.defaultdict(list)         # (target, src, dst) -> [lat...]
@@ -144,10 +174,122 @@ def main():
     fig = plt.figure(figsize=(14, 8))
     gs = fig.add_gridspec(3, 2, height_ratios=[1.2, 1.6, 1.8], width_ratios=[1,1], hspace=0.50, wspace=0.28)
 
-    # Suptitle (moved up for spacing)
+    # Suptitle (kept high to avoid overlap)
     fig.suptitle("DNS Executive Assessment (route-aware)", fontsize=16, fontweight="bold", y=0.995)
 
-    # KPI panel (top-left) — shifted lower to avoid overlap with suptitle
+    # KPI panel (top-left)
     ax_kpi = fig.add_subplot(gs[0, 0]); ax_kpi.axis("off")
     ax_kpi.text(0.0, 0.90, "DNS Health — Executive Summary", fontsize=14, fontweight="bold", va="top")
-   
+    ax_kpi.text(0.0, 0.76, f"Window: last {args.minutes} min   |   Dataset: {args.date} UTC   |   Trend by: {args.trend_by}",
+                fontsize=10)
+
+    kpi_y = 0.60; line_h = 0.13
+    def ok_style(v):
+        if v >= args.ok_thresh: return "good"
+        if v >= max(90.0, args.ok_thresh - 5.0): return "warn"
+        return "bad"
+    def p95_style(v):
+        if math.isnan(v): return "warn"
+        if v <= args.p95_thresh: return "good"
+        if v <= args.p95_thresh * 2: return "warn"
+        return "bad"
+
+    # Totals/OK/Fail
+    ax_kpi.text(0.00, kpi_y,       "Total queries:", fontsize=12)
+    ax_kpi.text(0.35, kpi_y,       f"{total:,}", fontsize=12)
+    ax_kpi.text(0.60, kpi_y,       "OK%:", fontsize=12)
+    ok_val = ok_style(ok_pct)
+    ax_kpi.text(0.75, kpi_y,       f"{ok_pct:.1f}%",
+                fontsize=12, color=("#2e7d32" if ok_val=="good" else "#ef6c00" if ok_val=="warn" else "#c62828"))
+    ax_kpi.text(0.00, kpi_y - line_h, "Failures:", fontsize=12)
+    ax_kpi.text(0.35, kpi_y - line_h, f"{fail_count:,}", fontsize=12, color=("#c62828" if fail_count>0 else "#2e7d32"))
+
+    # p50/p95
+    def fmt_ms2(x):
+        if x is None or math.isnan(x): return "—"
+        return f"{x:.1f} ms" if x < 1000 else f"{x/1000:.2f} s"
+    p95_val = p95_style(p95); p50_val = p95_style(p50)
+    ax_kpi.text(0.60, kpi_y - line_h,   "p50:", fontsize=12)
+    ax_kpi.text(0.75, kpi_y - line_h,   fmt_ms2(p50),
+                fontsize=12, color=("#2e7d32" if p50_val=="good" else "#ef6c00" if p50_val=="warn" else "#c62828"))
+    ax_kpi.text(0.60, kpi_y - 2*line_h, "p95:", fontsize=12)
+    ax_kpi.text(0.75, kpi_y - 2*line_h, fmt_ms2(p95),
+                fontsize=12, color=("#2e7d32" if p95_val=="good" else "#ef6c00" if p95_val=="warn" else "#c62828"))
+
+    # Threshold box (top-right)
+    ax_th = fig.add_subplot(gs[0, 1]); ax_th.axis("off")
+    ax_th.text(0.0, 0.95, "Thresholds", fontsize=12, fontweight="bold", va="top")
+    ax_th.text(0.0, 0.75, f"OK% ≥ {args.ok_thresh:.1f}%  (green)\n"
+                          f"p95 ≤ {args.p95_thresh:.1f} ms (green)\n"
+                          f"Between = yellow; worse = red", fontsize=10, va="top")
+
+    # Trend (middle row spans both cols)
+    ax_tr = fig.add_subplot(gs[1, :])
+    if trend_series:
+        # If overall: single line named 'p95 (per-minute)'; else, one per group with legend
+        if args.trend_by == "overall":
+            xs, ys = next(iter(trend_series.values()))
+            ax_tr.plot(xs, ys, linewidth=1.8, label="p95 (per-minute)")
+        else:
+            # Stable order: sort by series name
+            for name in sorted(trend_series.keys()):
+                xs, ys = trend_series[name]
+                ax_tr.plot(xs, ys, linewidth=1.6, label=name)
+        ax_tr.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        if args.p95_thresh:
+            ax_tr.axhline(args.p95_thresh, linestyle="--", linewidth=1.2, color="#555555",
+                          label=f"p95 threshold ({args.p95_thresh:.1f} ms)")
+        title_suffix = "" if args.trend_by == "overall" else f" — {args.trend_by}"
+        ax_tr.set_title(f"p95 Trend (per minute){title_suffix}", fontsize=12)
+        ax_tr.set_ylabel("Latency (ms)")
+        ax_tr.grid(True, axis="y", alpha=0.25)
+        if args.trend_by != "overall" or True:
+            ax_tr.legend(loc="upper right", fontsize=9, ncol=1)
+    else:
+        ax_tr.axis("off")
+        ax_tr.text(0.5, 0.5, "Not enough OK samples for per-minute p95 trend",
+                   ha="center", va="center", fontsize=11)
+
+    # Offenders (bottom spans both cols) — route-aware
+    ax_off = fig.add_subplot(gs[2, :])
+    if offenders:
+        labels, vals, colors, ann = [], [], [], []
+        for (t, src, dst, p95_t, okpct_t, tot_t) in offenders:
+            route = f"{src}→{dst}" if src or dst else "route n/a"
+            label_text = f"{t}  [{route}]"
+            labels.append(label_text)
+            v = 0.0 if math.isnan(p95_t) else p95_t
+            vals.append(v)
+            # color by thresholds
+            col = "#2e7d32"
+            if math.isnan(p95_t) or p95_t > args.p95_thresh or okpct_t < args.ok_thresh:
+                if okpct_t < args.ok_thresh or math.isnan(p95_t):
+                    col = "#c62828"
+                else:
+                    col = "#ef6c00"
+            colors.append(col)
+            ann.append(f"{okpct_t:.1f}%")
+        x = range(len(labels))
+        bars = ax_off.bar(x, vals, color=colors)
+        ax_off.set_ylabel("p95 (ms)")
+        ax_off.set_title(f"Worst Targets by p95 (Top {len(labels)}) — labels show OK% (route-aware)", fontsize=12)
+        def trim(s): return s if len(s) <= 48 else s[:45] + "…"
+        ax_off.set_xticks(x)
+        ax_off.set_xticklabels([trim(s) for s in labels], rotation=12, ha="right")
+        for rect, txt in zip(bars, ann):
+            ax_off.text(rect.get_x() + rect.get_width()/2, rect.get_height() + 0.5,
+                        txt, ha="center", va="bottom", fontsize=9)
+        ax_off.grid(True, axis="y", alpha=0.15)
+        if args.p95_thresh:
+            ax_off.axhline(args.p95_thresh, linestyle="--", linewidth=1.0, color="#555555")
+    else:
+        ax_off.axis("off")
+        ax_off.text(0.5, 0.5, "No targets to rank for offenders", ha="center", va="center", fontsize=11)
+
+    # Robust spacing (no tight_layout overlap)
+    fig.subplots_adjust(top=0.88, hspace=0.50, wspace=0.28)
+    plt.savefig(args.out, dpi=140, bbox_inches="tight")
+    print(f"[OK] Saved executive report -> {args.out}")
+
+if __name__ == "__main__":
+    main()
