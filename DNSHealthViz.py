@@ -252,7 +252,7 @@ def main():
         base_hdr = "{:<60} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7} {:>4}"
         mean_hdr = base_hdr + " {:>10}"
         hdr = base_hdr.format("Series (Resolver[/Target][Route])", "N", "OK%", "p50", "p95", "Last", "Age", "Thr")
-        if args.show-mean:
+        if args.show_mean:
             hdr = mean_hdr.format("Series (Resolver[/Target][Route])", "N", "OK%", "p50", "p95", "Last", "Age", "Thr", "Mean")
         print(hdr)
         print("-"*148)
@@ -282,14 +282,14 @@ def main():
                 if r["p95"] is not None and r["p95"] > p95_thr:
                     p95s = red(p95s)
                 # mean hint
-                if args.show-mean and r["mean"] is not None and r["mean"] > p95_thr:
+                if args.show_mean and r["mean"] is not None and r["mean"] > p95_thr:
                     means = yellow(means)
                 # rule marker
                 thr_mark = "*" if r["rule"] else ""
                 line = "{:<60} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7} {:>4}".format(
                     key_str[:60], r["count"], okpct, p50s, p95s, lasts, age, thr_mark
                 )
-                if args.show-mean:
+                if args.show_mean:
                     line = "{:<60} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7} {:>4} {:>10}".format(
                         key_str[:60], r["count"], okpct, p50s, p95s, lasts, age, thr_mark, means
                     )
