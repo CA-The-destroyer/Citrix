@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # DNSHealthViz_console.py — live console DNS dashboard (route-aware + per-series thresholds)
-# Stdlib only. Reads today's CSV from DNSHealthChk and renders a rolling table.
+# Stdlib only. Reads today's CSV from DNSHealthChk and renders a rolling, well-aligned table.
 # Features:
 #   - --group-by-route: aggregate per resolver [src->dst] if src_ip/dst_ip present
 #   - --group-by-target: one line per resolver/target
-#   - Global threshold coloring (OK% & p95) with per-series override rules (regex)
+#   - Per-series threshold rules (--rule / --rules-file)
+#   - Polished columns: fixed widths, right-aligned numerics, stable unit formatting
 #   - Timezone-safe (UTC-aware) timestamps
 #   - Backward compatible with CSVs without src_ip/dst_ip
 
@@ -15,6 +16,17 @@ DATEFMT = "%Y-%m-%d"
 # --- Global defaults (can be overridden per-series by rules) ---
 GLOBAL_THRESH_OK = 95.0    # percent
 GLOBAL_THRESH_P95 = 10.0   # ms
+
+# --- Column widths ---
+KEY_W  = 60
+N_W    = 5
+OK_W   = 7   # e.g., '100.0%' fits
+P50_W  = 8
+P95_W  = 8
+LAST_W = 8
+AGE_W  = 6   # '123s'
+THR_W  = 3   # '*' marker
+MEAN_W = 8
 
 # --- ANSI color helpers ---
 def color(s, code): return f"\033[{code}m{s}\033[0m"
@@ -56,7 +68,6 @@ def parse_row(line: str):
     # CSV columns (first 11 are fixed):
     # timestamp_utc,resolver,query,type,success,latency_ms,rcode,answers,ttl,used_tcp,error
     r = next(csv.reader([line]))
-    # pad to at least 11
     while len(r) < 11:
         r.append("")
     ts_iso, resolver, qname, rtype, success, latency_ms, rcode, answers, ttl, used_tcp, err = r[:11]
@@ -76,10 +87,20 @@ def parse_row(line: str):
 def clear_console():
     os.system("cls" if os.name == "nt" else "clear")
 
-def fmt_ms(x):
-    if x is None or math.isnan(x):
-        return "—"
-    return f"{x:.0f}ms" if x < 1000 else f"{x/1000:.2f}s"
+# Fixed-width latency formatting: keep column width stable regardless of 'ms'/'s'
+def fmt_ms_fixed(x, width):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return f"{'—':>{width}}"
+    if x < 1000:
+        # integer ms
+        return f"{int(round(x)):>{width-2}}ms"
+    # seconds with 2 decimals
+    return f"{x/1000:>{width-1}.2f}s"
+
+def fmt_pct_fixed(x, width):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return f"{'—':>{width}}"
+    return f"{x:>{width-1}.1f}%"
 
 def percentile(arr, p):
     if not arr:
@@ -109,7 +130,6 @@ def compile_rules(inline_rules, rules_file):
     # inline rules: --rule "pattern=<regex>; ok=95; p95=8"
     for raw in inline_rules or []:
         pat, ok, p95 = None, None, None
-        # Split on ; or , — support both
         parts = [p.strip() for p in re.split(r"[;,]", raw) if p.strip()]
         for p in parts:
             if p.lower().startswith("pattern="):
@@ -129,7 +149,7 @@ def compile_rules(inline_rules, rules_file):
     return rules
 
 def main():
-    ap = argparse.ArgumentParser(description="Console DNS dashboard (route-aware, per-series thresholds)")
+    ap = argparse.ArgumentParser(description="Console DNS dashboard (route-aware, per-series thresholds, aligned)")
     ap.add_argument("--csv-dir", required=True, help="Directory where DNSHealthChk writes CSVs (e.g., ~/DNS/logs)")
     ap.add_argument("--window", type=int, default=300, help="Rolling points per series (default 300)")
     ap.add_argument("--group-by-target", action="store_true",
@@ -148,7 +168,6 @@ def main():
     ap.add_argument("--p95-thresh", type=float, default=GLOBAL_THRESH_P95, help="Global p95 threshold ms (default 10)")
     args = ap.parse_args()
 
-    # compile rules
     rules = compile_rules(args.rule, args.rules_file)
 
     current_day = dt.datetime.now(dt.timezone.utc).strftime(DATEFMT)
@@ -163,7 +182,6 @@ def main():
     def build_context(resolver, qname, rtype, src, dst):
         target = f"{qname} ({rtype})"
         route = f"{src}->{dst}" if (src or dst) else "n/a"
-        # context string used for rule matching
         return f"{resolver} {target} {route}"
 
     def key_of(resolver, qname, rtype, src_ip="", dst_ip=""):
@@ -175,14 +193,14 @@ def main():
         return resolver  # default aggregate per resolver
 
     def apply_thresholds_for(key):
-        """Return (ok_thresh, p95_thresh, matched_rule_str_or_None) for this series key using its meta ctx."""
+        """Return (ok_thresh, p95_thresh, matched_rule_str_or_None)."""
         m = meta.get(key)
         if not m or not rules:
             return args.ok_thresh, args.p95_thresh, None
         ctx = m["ctx"]
         for rule in rules:  # first match wins
             if rule["regex"].search(ctx):
-                okv = rule["ok"] if rule["ok"] is not None else args.ok_thresh
+                okv  = rule["ok"]  if rule["ok"]  is not None else args.ok_thresh
                 p95v = rule["p95"] if rule["p95"] is not None else args.p95_thresh
                 return okv, p95v, rule["raw"]
         return args.ok_thresh, args.p95_thresh, None
@@ -211,7 +229,7 @@ def main():
         for k, dq in series.items():
             if not dq:
                 continue
-            oks = [v[1] for v in dq]
+            oks  = [v[1] for v in dq]
             lats = [v[2] for v in dq if not math.isnan(v[2])]
             cnt = len(dq)
             ok_rate = (sum(oks)/cnt)*100.0
@@ -237,66 +255,70 @@ def main():
             ingest(lines)
 
         clear_console()
-        print("DNSHealthViz (console, route-aware, rules) | Source:", csv_path)
+        # Header / banner
+        print(f"DNSHealthViz (console, route-aware, rules) | Source: {csv_path}")
         print("Window:", args.window, "points  Refresh:", args.refresh, "s  UTC:",
               dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         mode = "resolver"
         if args.group_by_target: mode = "resolver+target"
         elif args.group_by_route: mode = "resolver [src->dst]"
         print(f"Grouping: {mode}")
-        if rules:
-            print(f"Rules: {len(rules)} loaded (first match wins)")
-        print("-"*148)
+        if rules: print(f"Rules: {len(rules)} loaded (first match wins)")
 
-        # Add columns: Thr indicates custom rule applied (*)
-        base_hdr = "{:<60} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7} {:>4}"
-        mean_hdr = base_hdr + " {:>10}"
+        # Table header
+        sep = "-" * (KEY_W + N_W + OK_W + P50_W + P95_W + LAST_W + AGE_W + THR_W + (MEAN_W if args.show_mean else 0) + 10)
+        print(sep)
+        base_hdr = f"{{:<{KEY_W}}} {{:>{N_W}}} {{:>{OK_W}}} {{:>{P50_W}}} {{:>{P95_W}}} {{:>{LAST_W}}} {{:>{AGE_W}}} {{:>{THR_W}}}"
+        mean_hdr = base_hdr + f" {{:>{MEAN_W}}}"
         hdr = base_hdr.format("Series (Resolver[/Target][Route])", "N", "OK%", "p50", "p95", "Last", "Age", "Thr")
         if args.show_mean:
             hdr = mean_hdr.format("Series (Resolver[/Target][Route])", "N", "OK%", "p50", "p95", "Last", "Age", "Thr", "Mean")
         print(hdr)
-        print("-"*148)
+        print(sep)
 
         rows = summarize()
         if not rows:
             print("(waiting for data…)")
         else:
             for r in rows:
+                # Base strings with fixed widths FIRST (so colors don't affect alignment)
                 key_str = r["key"] if isinstance(r["key"], str) else f"{r['key'][0]} / {r['key'][1]}"
-                okpct = f"{r['ok_rate']:.1f}"
-                p50s = fmt_ms(r["p50"])
-                p95s = fmt_ms(r["p95"])
-                lasts = fmt_ms(r["last"])
-                age = f"{int(r['age']):>3}s"
-                means = fmt_ms(r["mean"]) if r["mean"] is not None else "—"
-                # thresholds (use per-series if present)
-                ok_thr = r["ok_thr"]; p95_thr = r["p95_thr"]
-                # colorize OK%
-                if r["ok_rate"] < ok_thr:
-                    okpct = red(okpct)
-                elif r["ok_rate"] < 99.9:
-                    okpct = yellow(okpct)
-                else:
-                    okpct = green(okpct)
-                # colorize p95
-                if r["p95"] is not None and r["p95"] > p95_thr:
-                    p95s = red(p95s)
-                # mean hint
-                if args.show_mean and r["mean"] is not None and r["mean"] > p95_thr:
-                    means = yellow(means)
-                # rule marker
-                thr_mark = "*" if r["rule"] else ""
-                line = "{:<60} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7} {:>4}".format(
-                    key_str[:60], r["count"], okpct, p50s, p95s, lasts, age, thr_mark
-                )
-                if args.show_mean:
-                    line = "{:<60} {:>5} {:>9} {:>10} {:>10} {:>9} {:>7} {:>4} {:>10}".format(
-                        key_str[:60], r["count"], okpct, p50s, p95s, lasts, age, thr_mark, means
-                    )
-                print(line)
+                key_str = (key_str[:KEY_W]) if len(key_str) > KEY_W else key_str  # trim if too long
 
-        print("-"*148)
-        print(f"Legend: OK% < per-series threshold → RED | p95 > per-series threshold → RED | Thr=* has custom rule")
+                n_str   = f"{r['count']:>{N_W}d}"
+                ok_str  = fmt_pct_fixed(r["ok_rate"], OK_W)
+                p50_str = fmt_ms_fixed(r["p50"], P50_W)
+                p95_str = fmt_ms_fixed(r["p95"], P95_W)
+                last_str= fmt_ms_fixed(r["last"], LAST_W)
+                age_str = f"{int(r['age']):>{AGE_W}d}s"
+                thr_str = ("*" if r["rule"] else "").rjust(THR_W)
+                mean_str= fmt_ms_fixed(r["mean"], MEAN_W) if args.show_mean else None
+
+                # Colorize AFTER formatting (colors wrap full-width strings)
+                # OK%
+                if r["ok_rate"] < r["ok_thr"]:
+                    ok_str = red(ok_str)
+                elif r["ok_rate"] < 99.9:
+                    ok_str = yellow(ok_str)
+                else:
+                    ok_str = green(ok_str)
+                # p95
+                if r["p95"] is not None and not (isinstance(r["p95"], float) and math.isnan(r["p95"])) and r["p95"] > r["p95_thr"]:
+                    p95_str = red(p95_str)
+                # mean hint (compare to p95 threshold so it's a soft signal)
+                if args.show_mean and r["mean"] is not None and not (isinstance(r["mean"], float) and math.isnan(r["mean"])) and r["mean"] > r["p95_thr"]:
+                    mean_str = yellow(mean_str)
+
+                # Print row
+                base_row = f"{{:<{KEY_W}}} {{:>{N_W}}} {{:>{OK_W}}} {{:>{P50_W}}} {{:>{P95_W}}} {{:>{LAST_W}}} {{:>{AGE_W}}} {{:>{THR_W}}}"
+                if args.show_mean:
+                    base_row += f" {{:>{MEAN_W}}}"
+                    print(base_row.format(key_str, n_str, ok_str, p50_str, p95_str, last_str, age_str, thr_str, mean_str))
+                else:
+                    print(base_row.format(key_str, n_str, ok_str, p50_str, p95_str, last_str, age_str, thr_str))
+
+        print(sep)
+        print("Legend: OK% < per-series threshold → RED | p95 > per-series threshold → RED | Thr=* has custom rule")
         print("Tip: --rule \"pattern=.*_ldap\\._tcp.*; ok=90; p95=15\"  |  --rules-file rules.json")
         time.sleep(args.refresh)
 
