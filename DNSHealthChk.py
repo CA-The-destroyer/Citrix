@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# DNSHealthChk.py — DNS health checker with CSV logging (no Bokeh)
-# Requires: dnspython  (pip install dnspython via your private /simple index)
-# Defaults to internal resolver 167.190.40.21
+# DNSHealthChk.py — DNS health checker with CSV logging (+ src/dst capture)
+# Requires: dnspython
+# Notes:
+#   - Appends two CSV columns: src_ip (local egress IP) and dst_ip (resolver IP)
+#   - Defaults to internal resolver 167.190.40.21
 
 import argparse
 import csv
@@ -11,6 +13,7 @@ import os
 import socket
 import time
 from typing import List, Tuple, Optional
+import ipaddress
 
 import dns.resolver
 import dns.exception
@@ -21,7 +24,7 @@ import dns.rcode
 # ----------------------------
 # Defaults / Config
 # ----------------------------
-DEFAULT_INTERVAL = 60          # seconds between rounds
+DEFAULT_INTERVAL = 30          # seconds between rounds
 DEFAULT_TIMEOUT = 2.0          # per-query timeout seconds
 DEFAULT_RETRIES = 1            # retries after initial attempt
 DEFAULT_RESOLVERS = ["167.190.40.21"]  # your internal DNS only
@@ -59,7 +62,7 @@ def write_header_if_needed(csv_path: str):
             w = csv.writer(f)
             w.writerow([
                 "timestamp_utc","resolver","query","type","success","latency_ms",
-                "rcode","answers","ttl","used_tcp","error"
+                "rcode","answers","ttl","used_tcp","error","src_ip","dst_ip"
             ])
 
 def append_row(csv_path: str, row: dict):
@@ -68,7 +71,8 @@ def append_row(csv_path: str, row: dict):
         w.writerow([
             row["timestamp_utc"], row["resolver"], row["query"], row["type"],
             1 if row["success"] else 0, row["latency_ms"], row["rcode"],
-            row["answers"], row["ttl"], 1 if row["used_tcp"] else 0, row["error"]
+            row["answers"], row["ttl"], 1 if row["used_tcp"] else 0, row["error"],
+            row.get("src_ip",""), row.get("dst_ip","")
         ])
 
 def parse_targets_file(path: Optional[str]):
@@ -103,6 +107,10 @@ def get_resolvers(entries: List[str], timeout: float) -> List[Tuple[str, dns.res
         if e.lower() == "system":
             out.append(("system", system_resolver(timeout)))
         else:
+            try:
+                ipaddress.ip_address(e)
+            except ValueError:
+                raise SystemExit(f"[ERROR] --resolvers entry '{e}' is not a valid IP (space-separated IPs, no commas or :53)")
             out.append((e, custom_resolver(e, timeout)))
     return out
 
@@ -116,7 +124,7 @@ def add_local_ptr_if_requested(targets: List[dict], want_ptr: bool, probe_host_f
         return
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((probe_host_for_ip, 53))  # internal DNS instead of 8.8.8.8
+        s.connect((probe_host_for_ip, 53))
         ip = s.getsockname()[0]
         s.close()
         rev = dns.reversename.from_address(ip).to_text(omit_final_dot=True)
@@ -185,13 +193,24 @@ def do_query(resolver: dns.resolver.Resolver, resolver_label: str,
             return finalize(False, "TIMEOUT", "", None, "Timeout after UDP and TCP")
     except Exception as e:
         rc = "ERROR"
-        # Best-effort extract rcode, if available
         try:
             if hasattr(e, "responses") and e.responses:
                 rc = dns.rcode.to_text(e.responses[0].rcode())
         except Exception:
             pass
         return finalize(False, rc, "", None, f"{type(e).__name__}: {e}")
+
+# -------- src/dst helpers --------
+def pick_src_ip_for(resolver_ip: str) -> str:
+    """Return the local source IPv4 that would be used to reach resolver_ip:53."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((resolver_ip, 53))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
 
 # ----------------------------
 # Main loop
@@ -211,8 +230,23 @@ def main():
 
     ensure_dir(args.csv_dir)
     targets = parse_targets_file(args.targets_file)
-    add_local_ptr_if_requested(targets, args.probe_local_ptr, probe_host_for_ip=DEFAULT_RESOLVERS[0])
+    # Probe IP uses first default resolver by default; override to first provided if present
+    probe_ip = (args.resolvers[0] if args.resolvers else DEFAULT_RESOLVERS[0])
+    add_local_ptr_if_requested(targets, args.probe_local_ptr, probe_host_for_ip=probe_ip)
+
     resolvers = get_resolvers(args.resolvers, args.timeout)
+
+    # Map resolver label/IP -> source IP we’d use to reach it, and actual dst_ip
+    src_ip_map = {}
+    dst_ip_map = {}
+    for label, r in resolvers:
+        if label == "system":
+            # choose first nameserver the system resolver will use (if present)
+            dst = r.nameservers[0] if getattr(r, "nameservers", None) else ""
+        else:
+            dst = label
+        dst_ip_map[label] = dst
+        src_ip_map[label] = pick_src_ip_for(dst) if dst else ""
 
     print(f"[INFO] DNSHealthChk started | resolvers={[r[0] for r in resolvers]} | interval={args.interval}s timeout={args.timeout}s retries={args.retries}")
     print(f"[INFO] Targets: {', '.join([t['name']+'('+t['type']+')' for t in targets])}")
@@ -225,6 +259,9 @@ def main():
             qtype = t.get("type", "A").upper()
             for label, r in resolvers:
                 row = do_query(r, label, qname, qtype, args.timeout, args.retries)
+                # decorate with src/dst fields
+                row["src_ip"] = src_ip_map.get(label, "")
+                row["dst_ip"] = dst_ip_map.get(label, "")
                 append_row(csv_path, row)
                 time.sleep(0.03)  # tiny spacing
         time.sleep(args.interval + (os.getpid() % 5) * 0.05)
