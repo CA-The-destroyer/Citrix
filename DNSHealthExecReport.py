@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # DNSHealthExecReport.py — Executive-friendly DNS health report (PNG)
 # Adds --trend-by {overall,resolver,route} for per-minute p95 trend lines.
-# Route-aware offenders (target + src->dst). Deps: matplotlib (no pandas/numpy).
+# Route-aware offenders (target + src->dst). Layout tuned to avoid title overlap.
+# Deps: matplotlib (no pandas/numpy).
 
 import argparse, csv, datetime as dt, os, math, collections
 import matplotlib
@@ -107,7 +108,6 @@ def main():
     fail_count = total - ok_count
 
     # ---------- Trend: per-minute p95 ----------
-    # Group key depending on trend-by
     def trend_key(r):
         if args.trend_by == "overall":
             return "overall"
@@ -122,7 +122,6 @@ def main():
             g = trend_key(r)
             minute_bins_by_group[g][bucket_minute(r["ts"])].append(r["lat"])
 
-    # Build trend series (group -> (x[], y[]))
     trend_series = {}
     for g, bins in minute_bins_by_group.items():
         xs, ys = [], []
@@ -133,18 +132,17 @@ def main():
         if xs:
             trend_series[g] = (xs, ys)
 
-    # If too many groups, pick the "worst" N by recent p95
+    # Limit number of trend series for readability
     if args.trend_by != "overall" and len(trend_series) > args.trend_max_series:
         ranked = []
         for g, (xs, ys) in trend_series.items():
             last = ys[-1] if ys else float("nan")
             ranked.append((g, last if not math.isnan(last) else -1.0))
-        # sort by last p95 desc (NaNs last)
         ranked.sort(key=lambda t: (t[1] if t[1] is not None else -1.0), reverse=True)
         keep = set(g for g, _ in ranked[:args.trend_max_series])
         trend_series = {g: v for g, v in trend_series.items() if g in keep}
 
-    # ---------- Route-aware offenders: (target, src, dst) ----------
+    # ---------- Route-aware offenders ----------
     per_group_lats = collections.defaultdict(list)         # (target, src, dst) -> [lat...]
     per_group_ok   = collections.defaultdict(lambda: [0,0])# (target, src, dst) -> [ok, total]
     for r in rows:
@@ -172,18 +170,16 @@ def main():
 
     # ---------- Figure ----------
     fig = plt.figure(figsize=(14, 8))
-    gs = fig.add_gridspec(3, 2, height_ratios=[1.2, 1.6, 1.8], width_ratios=[1,1], hspace=0.50, wspace=0.28)
+    # More top margin + a bit more space between rows to prevent collisions
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.2, 1.6, 1.8], width_ratios=[1,1], hspace=0.52, wspace=0.30)
 
-    # Suptitle (kept high to avoid overlap)
-    fig.suptitle("DNS Executive Assessment (route-aware)", fontsize=16, fontweight="bold", y=0.995)
+    # Single suptitle only (no second title in KPI panel)
+    fig.suptitle("DNS Executive Assessment (route-aware)", fontsize=16, fontweight="bold", y=0.992)
 
-    # KPI panel (top-left)
+    # KPI panel (top-left) — metrics only
     ax_kpi = fig.add_subplot(gs[0, 0]); ax_kpi.axis("off")
-    ax_kpi.text(0.0, 0.90, "DNS Health — Executive Summary", fontsize=14, fontweight="bold", va="top")
-    ax_kpi.text(0.0, 0.76, f"Window: last {args.minutes} min   |   Dataset: {args.date} UTC   |   Trend by: {args.trend_by}",
-                fontsize=10)
+    kpi_y = 0.88; line_h = 0.16
 
-    kpi_y = 0.60; line_h = 0.13
     def ok_style(v):
         if v >= args.ok_thresh: return "good"
         if v >= max(90.0, args.ok_thresh - 5.0): return "warn"
@@ -216,22 +212,24 @@ def main():
     ax_kpi.text(0.75, kpi_y - 2*line_h, fmt_ms2(p95),
                 fontsize=12, color=("#2e7d32" if p95_val=="good" else "#ef6c00" if p95_val=="warn" else "#c62828"))
 
-    # Threshold box (top-right)
+    # Threshold box (top-right) + context line moved here to avoid crowding
     ax_th = fig.add_subplot(gs[0, 1]); ax_th.axis("off")
-    ax_th.text(0.0, 0.95, "Thresholds", fontsize=12, fontweight="bold", va="top")
-    ax_th.text(0.0, 0.75, f"OK% ≥ {args.ok_thresh:.1f}%  (green)\n"
+    # Context line (window/date/trend) at the top of this box
+    ax_th.text(0.0, 0.98,
+               f"Window: last {args.minutes} min   |   Dataset: {args.date} UTC   |   Trend by: {args.trend_by}",
+               fontsize=10, va="top")
+    ax_th.text(0.0, 0.72, "Thresholds", fontsize=12, fontweight="bold", va="top")
+    ax_th.text(0.0, 0.52, f"OK% ≥ {args.ok_thresh:.1f}%  (green)\n"
                           f"p95 ≤ {args.p95_thresh:.1f} ms (green)\n"
                           f"Between = yellow; worse = red", fontsize=10, va="top")
 
     # Trend (middle row spans both cols)
     ax_tr = fig.add_subplot(gs[1, :])
     if trend_series:
-        # If overall: single line named 'p95 (per-minute)'; else, one per group with legend
         if args.trend_by == "overall":
             xs, ys = next(iter(trend_series.values()))
             ax_tr.plot(xs, ys, linewidth=1.8, label="p95 (per-minute)")
         else:
-            # Stable order: sort by series name
             for name in sorted(trend_series.keys()):
                 xs, ys = trend_series[name]
                 ax_tr.plot(xs, ys, linewidth=1.6, label=name)
@@ -243,8 +241,7 @@ def main():
         ax_tr.set_title(f"p95 Trend (per minute){title_suffix}", fontsize=12)
         ax_tr.set_ylabel("Latency (ms)")
         ax_tr.grid(True, axis="y", alpha=0.25)
-        if args.trend_by != "overall" or True:
-            ax_tr.legend(loc="upper right", fontsize=9, ncol=1)
+        ax_tr.legend(loc="upper right", fontsize=9, ncol=1)
     else:
         ax_tr.axis("off")
         ax_tr.text(0.5, 0.5, "Not enough OK samples for per-minute p95 trend",
@@ -260,7 +257,6 @@ def main():
             labels.append(label_text)
             v = 0.0 if math.isnan(p95_t) else p95_t
             vals.append(v)
-            # color by thresholds
             col = "#2e7d32"
             if math.isnan(p95_t) or p95_t > args.p95_thresh or okpct_t < args.ok_thresh:
                 if okpct_t < args.ok_thresh or math.isnan(p95_t):
@@ -287,7 +283,7 @@ def main():
         ax_off.text(0.5, 0.5, "No targets to rank for offenders", ha="center", va="center", fontsize=11)
 
     # Robust spacing (no tight_layout overlap)
-    fig.subplots_adjust(top=0.88, hspace=0.50, wspace=0.28)
+    fig.subplots_adjust(top=0.88, hspace=0.52, wspace=0.30)
     plt.savefig(args.out, dpi=140, bbox_inches="tight")
     print(f"[OK] Saved executive report -> {args.out}")
 
