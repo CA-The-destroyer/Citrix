@@ -127,23 +127,28 @@ def main():
     # Cap number of facets
     keys = sorted(groups.keys(), key=str)
     if len(keys) > args.max_facets:
-        # rank by count desc, then by recent failure presence
+        # rank by failures first, then count
         scored = []
         for k in keys:
             g = groups[k]
             cnt = len(g)
             has_fail = any(not x["ok"] for x in g)
-            score = (has_fail, cnt)  # failures first, then bigger
-            scored.append((k, score))
-        scored.sort(key=lambda t: (t[1][0], t[1][1]), reverse=True)
-        keys = [k for k,_ in scored[:args.max_facets]]
+            scored.append((k, has_fail, cnt))
+        scored.sort(key=lambda t: (t[1], t[2]), reverse=True)
+        keys = [k for k, _, _ in scored[:args.max_facets]]
 
     height = 2.5 * max(1, len(keys)) + 1.2
     fig, axes = plt.subplots(len(keys), 1, figsize=(14, height), sharex=True)
-    if not isinstance(axes, (list, tuple)):
+
+    # --- FIX: always flatten to a list of Axes objects ---
+    if isinstance(axes, (list, tuple)):
+        axes = list(axes)
+    elif hasattr(axes, "flatten"):
+        axes = axes.flatten().tolist()
+    else:
         axes = [axes]
 
-    # Colors (fixed hex to be clear)
+    # Colors
     COL_OK = "#1565C0"   # blue circle
     COL_FAIL = "#C62828" # red x
     COL_TCP = "#6A1B9A"  # purple square
@@ -186,19 +191,24 @@ def main():
         ax.set_ylabel("ms")
         ax.grid(True, axis="y", alpha=0.18)
 
+    # X axis formatting
     axes[-1].set_xlabel("Time (UTC)")
     for ax in axes:
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
     fig.suptitle(args.title, fontsize=14, fontweight="bold", y=0.995)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    # legend: combine unique labels
+
+    # Build a single shared legend from unique labels
+    seen_labels = set()
     handles, labels = [], []
     for ax in axes:
         h, l = ax.get_legend_handles_labels()
         for hi, li in zip(h, l):
-            if li not in labels:
-                labels.append(li); handles.append(hi)
+            if li not in seen_labels:
+                seen_labels.add(li)
+                handles.append(hi)
+                labels.append(li)
     if handles:
         fig.legend(handles, labels, loc="upper right")
 
