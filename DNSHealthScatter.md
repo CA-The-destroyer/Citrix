@@ -13,7 +13,7 @@ python3 DNSHealthScatter.py \
 # Focus on a specific resolver and a couple of targets
 python3 DNSHealthScatter.py \
   --csv-dir ~/DNS/logs --group-by target \
-  --resolver 167.190.40.21 \
+  --resolver IPADDRESS \
   --target ddc01.corp.local(A) --target _ldap._tcp.corp.local(SRV) \
   --y-max 300 --threshold-ms 10 \
   --out ~/DNS/dns_scatter_targets.png
@@ -22,3 +22,4 @@ python3 DNSHealthScatter.py \
 python3 DNSHealthScatter.py \
   --csv ~/DNS/logs/dns_trend_$(date -u +%F).csv \
   --group-by route --out ~/DNS/dns_scatter.png
+
