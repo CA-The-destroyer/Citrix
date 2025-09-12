@@ -1,0 +1,2 @@
+# Only needed for Exec + Scatter reports
+matplotlib>=3.9.0
